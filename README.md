@@ -2,7 +2,7 @@
 
 **`happy-birthday.mp4`**: a 20-second vertical (1080×1920, 9:16) birthday greeting for a good friend,
 with a synthesized soundtrack. It's sized for phones, so it works in messaging apps, Stories, Reels and Shorts.
-`happy-birthday-poster.png` is its last frame, which you can use as a cover image.
+`happy-birthday-poster.jpg` is its last frame, which you can use as a cover image.
 
 A candle lights, the camera pulls back to a cake whose candles catch one by one ("Candles? *Lit.*"), you
 make a wish and blow them out, and the smoke rises as fireworks. The last firework floods the screen pink,

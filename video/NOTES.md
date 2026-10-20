@@ -55,4 +55,13 @@ bells; no lyrics are sung.
 
 ## Checks (final build)
 
-See the end of this file: filled in from `build.sh` / `tools/check.py`.
+Rendered with 4 motion-blur sub-frames (8–12 inside the camera moves, rockets and irises). Encoded at
+CRF 22 (9.8 MB, 3.9 Mb/s). `tools/check.py` results:
+
+- Format: 1080×1920 @ 30 fps, 20.000 s, phone venue.
+- Picture: median mean luma 0.24, max 0.50 (bright enough for a phone); no grey washes.
+- Text: 14 elements, 27 words: OK. Reading time, overlaps, hand-offs, sizes, phone safe zones and
+  end-card hold (complete by 17.5 s, 2.5 s before the end) all pass.
+- Audio: −14.0 LUFS integrated, −1.6 dBTP true peak, LRA 8.1 LU. Energy below 120 Hz: 4%.
+- Sync (median onset offset): candle chain +2 ms, firework bursts +4 ms, song syllables +15 ms.
+- The mix was verified by measurement only, not by listening.
