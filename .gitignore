@@ -1,0 +1,5 @@
+video/frames/
+video/stills/
+node_modules/
+__pycache__/
+*.pyc

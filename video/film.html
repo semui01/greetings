@@ -1,0 +1,481 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Happy Birthday</title>
+<link rel="stylesheet" href="fonts/fonts.css">
+<style>
+/* Preview shell only. The film is one canvas; ?render switches to frame-by-frame capture. */
+html,body{margin:0;height:100%;background:#05070d;color:#9aa3bf;font:13px/1.4 ui-monospace,monospace}
+body{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:10px}
+canvas{height:calc(100vh - 64px);aspect-ratio:var(--ar,.5625);display:block}
+.ctl{display:flex;gap:12px;align-items:center;width:calc((100vh - 64px)*var(--ar,.5625))}
+.ctl input{flex:1}
+.ctl button{font:inherit;color:#e8ebf5;background:#11162a;border:1px solid #262f4d;border-radius:6px;padding:4px 10px;cursor:pointer}
+body.render{display:block} body.render .ctl{display:none} body.render canvas{height:auto;aspect-ratio:auto}
+</style>
+</head>
+<body>
+<canvas id="c" aria-label="Birthday greeting"></canvas>
+<div class="ctl"><button id="pp">Pause</button><input id="scrub" type="range" min="0" max="20" step="0.001" value="0"><span id="tc">0.00 s</span></div>
+<script src="engine.js"></script>
+<script src="greeting.js"></script>
+<script>
+/* HAPPY BIRTHDAY: a 20-second vertical (1080×1920, 30 fps) greeting.
+   One candle lights → the camera pulls back to a cake whose candles light in a chain → make a wish,
+   the candles blow out → the smoke turns into sparks that rise as fireworks → the last firework floods
+   the frame pink and HAPPY BIRTHDAY lands letter by letter on the song's syllables, with confetti →
+   an iris closes onto two glasses that clink: "Here's to you, my friend!"
+   Layout keeps text inside the phone safe area (y 221–1536, clear of the right-hand rail). */
+(() => {
+'use strict';
+const {clamp, lerp, prog, E, hash, rng, rgba, mix, glow, add, sim, cam} = M;
+
+/* 1. Palette and type. Gold = candlelight and fire; lilac = the wish; the party colours are confetti. */
+const C = {bg:'#1d1033', fg:'#fff4e6', muted:'#efd9ec', faint:'#8f7aa6',
+  flame:'#ffc857', ember:'#ff8a3d', gold:'#ffd23f', pink:'#ff5fa2', coral:'#ff7a59', mint:'#3ee6c1', sky:'#5ab0ff', lilac:'#b994ff',
+  cream:'#fff6ea', wine:'#4a1340', plum:'#3b1a45', night:'#1a1442', deep:'#0f0b2a', rose:'#ff4f9a'};
+Object.assign(T, {DISP:'"Fraunces", Georgia, serif', BODY:'"DM Sans", system-ui, sans-serif', MONO:'"DM Mono", ui-monospace, monospace',
+  fg:C.fg, muted:C.muted, faint:C.faint, calloutPx:30, calloutSubPx:32});
+const W = 1080, H = 1920, DUR = 20, CX = 540;
+const film = Film.create({W, H, FPS:30, DUR, bg:C.bg, fadeIn:0, grain:.07, vignette:.42});
+const NAME = String((window.GREETING && window.GREETING.name) || '').trim();
+const HEAD = `300 100px ${T.DISP}`, HEAD_I = `italic 300 100px ${T.DISP}`;
+
+/* 2. Timing. 120 BPM grid (0.5 s); the song lines are in 3/4 with "Hap-py" as a pickup. */
+const TM = {
+  ignite:.4, t1:[.7, .85], out1:2.6, pull:[2.7, 3.9],
+  t2:3.3, chain:[4.0, 4.25, 4.5, 4.75], lit:4.8, out2:6.1,
+  push:[6.2, 8.2], t3:[6.5, 6.65], gust:[7.8, 8.5], out3:8.5, glint:8.95, tilt:[9.0, 10.2],
+  t4:[9.3, 9.45], out4:11.3, bursts:[10.0, 10.25, 10.5, 10.75, 11.0, 11.25, 11.5, 11.75], flight:1.0,
+  heroUp:11.0, hero:12.0, iris:[12.0, 12.45],
+  song1:[12.5, 12.875, 13.0, 13.5, 14.0, 14.5], cannons:13.5, balloons:13.15,
+  close:[15.25, 15.75], glassIn:[15.35, 16.0], clink:16.0,
+  e1:16.2, e2:16.35, sub:16.85, song4:[17.0, 17.375, 17.5, 18.0, 18.5, 19.0],
+};
+film.blur = [[TM.pull[0], TM.pull[1], 10], [TM.tilt[0], TM.hero + .1, 8], [TM.iris[0], TM.iris[1] + .1, 12],
+  [TM.song1[0], TM.song1[3] + .35, 6], [TM.cannons, TM.cannons + .8, 8], [TM.close[0], TM.clink + .1, 10]];
+
+/* 3. Precomputed world: glow sprites, bokeh, stars, the cake, candles, rockets, bursts, confetti. */
+const SPR = {}, DISC = {};
+function sprite(cache, col, stops) {
+  if (cache[col]) return cache[col];
+  const c = document.createElement('canvas'); c.width = c.height = 128;
+  const g = c.getContext('2d'), gr = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+  stops.forEach(([s, a]) => gr.addColorStop(s, rgba(col, a))); g.fillStyle = gr; g.fillRect(0, 0, 128, 128);
+  return (cache[col] = c);
+}
+const glowSpr = col => sprite(SPR, col, [[0, 1], [.16, .6], [.45, .14], [1, 0]]);
+const discSpr = col => sprite(DISC, col, [[0, .55], [.72, .5], [.86, .3], [1, 0]]);
+function dot(ctx, img, x, y, r, a) { if (a <= .003 || r <= .3) return; const ga = ctx.globalAlpha; ctx.globalAlpha = ga * Math.min(1, a); ctx.drawImage(img, x - r, y - r, 2 * r, 2 * r); ctx.globalAlpha = ga; }
+
+const R0 = rng(7);
+const BOKEH = [...Array(26)].map((_, i) => ({x:R0() * W, y:-700 + R0() * 2700, r:30 + R0() * 70, col:[C.pink, C.gold, C.lilac, C.coral, C.sky][i % 5], a:.05 + R0() * .08, ph:R0() * 6.28}));
+const STARS = [...Array(170)].map(() => ({x:-150 + R0() * 1380, y:-2300 + R0() * 2700, r:.8 + R0() * 1.8, ph:R0() * 6.28, sp:1 + R0() * 3}));
+
+// The cake: three tiers (top surface y, height, radii) on a gold stand.
+const TIERS = [
+  {y:1278, h:228, rx:380, ry:60, body:'#ff7eb6', dark:'#a8285f', top:'#ffd0e6', icing:'#fff1f7', seed:3},
+  {y:1106, h:172, rx:300, ry:50, body:'#fff0dc', dark:'#b98a6c', top:'#fffaf2', icing:'#ff9fcb', seed:7},
+  {y:950, h:156, rx:220, ry:40, body:'#c7a6ff', dark:'#5f3fae', top:'#f1e8ff', icing:'#fff6ea', seed:11},
+];
+const PLATE = {y:1506, rx:455, ry:66};
+const HERO = {x:540, y:952, h:150, w:26, col:C.pink, side:0, step:-1, seed:0};
+// Two interleaved rows (back row higher), so every candle shows; the fire spreads outward in a zigzag.
+const RING = [[0, 50, -20], [0, -50, -20], [1, 95, 16], [1, -95, 16], [2, 140, -16], [2, -140, -16], [3, 185, 14], [3, -185, 14]].map(([step, dx, dy], k) =>
+  ({x:540 + dx, y:952 + dy, h:dy < 0 ? 112 : 102, w:20, step, side:Math.sign(dx), seed:k + 1,
+    col:[C.mint, C.sky, C.gold, C.coral, C.lilac, C.mint, C.sky, C.gold][k]}));
+const CANDLES = [HERO, ...RING];
+CANDLES.forEach(c => {
+  c.on = c === HERO ? TM.ignite : TM.chain[c.step];
+  c.off = TM.gust[0] + .3 + (c.x - 380) / 320 * .25;            // the breath comes from the left
+  c.wx = c.x; c.wy = c.y - c.h - 9;                              // wick tip
+  c.src = c === HERO ? null : c.step === 0 ? HERO : RING.find(o => o.step === c.step - 1 && o.side === c.side);
+});
+const BY_DEPTH = [...CANDLES].sort((a, b) => a.y - b.y);
+
+// Fireworks: each ring candle's wish rises to one burst (screen positions at the final camera, world = screen − 1500 in y).
+const SKY = -1500;
+const BURSTS = [
+  {x:300, y:1010, col:C.gold, col2:C.cream, R:270, type:'peony', from:5},
+  {x:785, y:890, col:C.pink, col2:C.cream, R:250, type:'ring', from:4},
+  {x:560, y:1240, col:C.mint, col2:C.sky, R:290, type:'peony', from:0},
+  {x:225, y:1300, col:C.gold, col2:C.flame, R:240, type:'willow', from:7},
+  {x:850, y:1280, col:C.coral, col2:C.gold, R:240, type:'peony', from:6},
+  {x:430, y:840, col:C.lilac, col2:C.cream, R:230, type:'ring', from:1},
+  {x:735, y:1070, col:C.gold, col2:C.flame, R:280, type:'willow', from:2},
+  {x:330, y:1110, col:C.pink, col2:C.lilac, R:250, type:'peony', from:3},
+].map((b, i) => ({...b, t:TM.bursts[i], wy:b.y + SKY}));
+const HERO_BURST = {x:540, y:980, col:C.cream, col2:C.gold, R:640, type:'peony', t:TM.hero};
+const ROCKETS = BURSTS.map(b => { const c = RING[b.from]; return {sx:c.wx + 24, sy:c.wy - 150, bx:b.x, by:b.wy, t0:b.t - TM.flight, t1:b.t, seed:b.from, col:b.col, c}; });
+ROCKETS.push({sx:HERO.wx + 24, sy:HERO.wy - 150, bx:HERO_BURST.x, by:HERO_BURST.y + SKY, t0:TM.heroUp, t1:TM.hero, seed:9, col:C.gold, c:HERO, big:true});
+[...BURSTS, HERO_BURST].forEach((b, bi) => {
+  const r = rng(40 + bi), n = b === HERO_BURST ? 160 : b.type === 'ring' ? 64 : 90;
+  b.parts = [...Array(n)].map((_, i) => ({a:i / n * 6.283 + (r() - .5) * .12, f:b.type === 'ring' ? .92 + r() * .08 : b.type === 'willow' ? .6 + r() * .4 : .35 + r() * .65,
+    life:(b.type === 'willow' ? 2.0 : 1.35) + r() * .5, col:i % 4 === 3 ? b.col2 : b.col, sz:.75 + r() * .5, tw:r()}));
+});
+
+// Confetti from two cannons at the bottom corners: a fast burst, then the air catches each piece and it flutters down.
+const CONF_COLS = [C.gold, C.mint, C.sky, C.cream, C.lilac, C.gold, C.mint, C.sky, '#ffffff', C.coral];
+const CONF = sim({n:300, dur:7, hz:120, seed:21,
+  init:(i, r) => {
+    const left = i % 2 === 0, a = .16 + r() * .46, sp = 1500 + r() * 1500;
+    return {x:left ? -20 : W + 20, y:1630 + r() * 80, vx:(left ? 1 : -1) * Math.sin(a) * sp, vy:-Math.cos(a) * sp,
+      rot:r() * 6.28, vr:(r() - .5) * 16, fl:r() * 6.28, vf:5 + r() * 9, z:r()};
+  },
+  step:(p, t, dt) => {
+    const k = 1.1 + 5.5 * clamp((t - .35) / .7);
+    p.vx += (-p.vx * k + Math.sin(p.fl * .5 + p.z * 9) * 170 * clamp((t - .6) / .6)) * dt;
+    p.vy += (1050 - p.vy * k) * dt;
+    p.x += p.vx * dt; p.y += p.vy * dt; p.rot += p.vr * dt * (.35 + .65 * Math.exp(-t)); p.fl += p.vf * dt;
+  }});
+
+const BALLOONS = [{x:150, col:C.gold, t0:TM.balloons, v:430, r:72}, {x:935, col:C.mint, t0:TM.balloons + .15, v:390, r:78},
+  {x:390, col:C.sky, t0:TM.balloons + .45, v:410, r:62}, {x:735, col:C.lilac, t0:TM.balloons + .6, v:450, r:68}];
+
+// HAPPY BIRTHDAY: each letter lands on its syllable of the song (Hap-py birth-day).
+const S1 = TM.song1;
+const WORDS = [
+  {s:'HAPPY', y:720, px:236, land:[S1[0], S1[0] + .06, S1[0] + .12, S1[1], S1[1] + .06], col:[C.cream, C.gold, C.mint, C.sky, C.cream]},
+  {s:'BIRTHDAY', y:920, px:168, land:[S1[2], S1[2] + .05, S1[2] + .1, S1[2] + .15, S1[2] + .2, S1[3], S1[3] + .05, S1[3] + .1],
+    col:[C.gold, C.cream, C.mint, C.sky, C.gold, C.cream, C.mint, C.sky]},
+];
+const LETTER_FONT = px => `900 ${px}px ${T.DISP}`;
+
+// Camera for the candle/cake/sky world: one continuous move (push on the flame → pull back → push → tilt to the sky).
+const camAt = cam.path([
+  {t:0, fx:540, fy:800, ax:540, ay:1040, s:2.2},
+  {t:TM.pull[0], fx:540, fy:800, ax:540, ay:1040, s:2.35},
+  {t:TM.pull[1], fx:540, fy:1060, ax:540, ay:1060, s:1},
+  {t:TM.push[0], fx:540, fy:1060, ax:540, ay:1060, s:1},
+  {t:TM.push[1], fx:540, fy:960, ax:540, ay:1000, s:1.12},
+  {t:TM.tilt[0], fx:540, fy:960, ax:540, ay:1000, s:1.12},
+  {t:TM.tilt[1], fx:540, fy:-440, ax:540, ay:1060, s:1},
+  {t:DUR, fx:540, fy:-440, ax:540, ay:1060, s:1},
+], W, H);
+
+/* helpers for the world */
+const lit = (c, t) => { const a = prog(t, c.on, c.on + .3); if (a <= 0) return 0; return E.outBack(a) * (1 - E.inQuad(prog(t, c.off, c.off + .14))); };
+const lean = (c, t) => 1.15 * E.inOutCubic(prog(t, c.off - .45, c.off)) + .08 * Math.sin(t * 2.3 + c.seed);
+const litTotal = t => CANDLES.reduce((s, c) => s + clamp(lit(c, t)), 0);
+
+function drawTier(ctx, tr, light) {
+  const {y, h, rx, ry} = tr, x0 = CX - rx, x1 = CX + rx;
+  const g = ctx.createLinearGradient(x0, 0, x1, 0);
+  g.addColorStop(0, tr.dark); g.addColorStop(.28, tr.body); g.addColorStop(.42, M.mix(tr.body, '#ffffff', .25)); g.addColorStop(.75, tr.body); g.addColorStop(1, tr.dark);
+  ctx.fillStyle = g; ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(x0, y + h); ctx.ellipse(CX, y + h, rx, ry, 0, Math.PI, 0, true); ctx.lineTo(x1, y); ctx.closePath(); ctx.fill();
+  // sprinkles on the front
+  for (let k = 0; k < 26; k++) {
+    const a = .12 * Math.PI + hash(k, tr.seed) * .76 * Math.PI, sx = CX + Math.cos(a) * rx * .96, sy = y + 46 + hash(k, tr.seed + 1) * (h - 40) + Math.sin(a) * ry;
+    ctx.save(); ctx.translate(sx, sy); ctx.rotate(hash(k, tr.seed + 2) * 6.28); ctx.fillStyle = [C.gold, C.mint, C.sky, '#ffffff', C.coral][k % 5];
+    ctx.beginPath(); ctx.roundRect(-7, -2.5, 14, 5, 2.5); ctx.fill(); ctx.restore();
+  }
+  // pearl border along the bottom edge
+  for (let k = 0; k <= 22; k++) {
+    const a = Math.PI * k / 22, px = CX + Math.cos(a) * rx, py = y + h + Math.sin(a) * ry;
+    const pg = ctx.createRadialGradient(px - 3, py - 4, 1, px, py, 11); pg.addColorStop(0, '#ffffff'); pg.addColorStop(1, M.mix(tr.icing, '#d8b8c8', .4));
+    ctx.fillStyle = pg; ctx.beginPath(); ctx.arc(px, py, 10, 0, 7); ctx.fill();
+  }
+  // top surface and dripping icing
+  ctx.fillStyle = tr.icing; ctx.beginPath(); ctx.ellipse(CX, y, rx, ry, 0, 0, 7); ctx.fill();
+  ctx.beginPath(); ctx.moveTo(x1, y);
+  for (let k = 0; k <= 60; k++) { const a = Math.PI * k / 60, d = 14 + 34 * Math.pow(Math.max(0, Math.sin(a * 11 + tr.seed)), 3) + 8 * hash(k, tr.seed); ctx.lineTo(CX + Math.cos(a) * rx, y + Math.sin(a) * ry + d); }
+  ctx.lineTo(x0, y); ctx.ellipse(CX, y, rx, ry, 0, Math.PI, 0, true); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = rgba(tr.top, .9); ctx.beginPath(); ctx.ellipse(CX, y - 2, rx * .94, ry * .86, 0, 0, 7); ctx.fill();
+  // candlelight on the top surface
+  if (light > 0) add(ctx, () => dot(ctx, glowSpr(C.flame), CX, y - 10, rx * 1.1, .12 * light));
+}
+function drawCandle(ctx, c) {
+  const x0 = c.x - c.w / 2, top = c.y - c.h;
+  ctx.save(); ctx.beginPath(); ctx.rect(x0, top, c.w, c.h); ctx.clip();
+  const g = ctx.createLinearGradient(x0, 0, x0 + c.w, 0); g.addColorStop(0, M.mix(c.col, '#000000', .25)); g.addColorStop(.35, M.mix(c.col, '#ffffff', .3)); g.addColorStop(1, M.mix(c.col, '#000000', .35));
+  ctx.fillStyle = g; ctx.fillRect(x0, top, c.w, c.h);
+  ctx.strokeStyle = 'rgba(255,255,255,.75)'; ctx.lineWidth = c.w * .28;
+  for (let k = -2; k < c.h / 18 + 2; k++) { ctx.beginPath(); ctx.moveTo(x0 - 4, top + k * 22); ctx.lineTo(x0 + c.w + 4, top + k * 22 + 14); ctx.stroke(); }
+  ctx.restore();
+  ctx.fillStyle = M.mix(c.col, '#ffffff', .45); ctx.beginPath(); ctx.ellipse(c.x, top, c.w / 2, c.w * .18, 0, 0, 7); ctx.fill();
+  ctx.strokeStyle = '#2a1a1a'; ctx.lineWidth = 2.4; ctx.lineCap = 'round'; ctx.beginPath(); ctx.moveTo(c.x, top); ctx.quadraticCurveTo(c.x + 1, top - 5, c.x + .5, c.wy + 2); ctx.stroke();
+}
+function drawFlame(ctx, c, t, L) {
+  if (L <= .01) return;
+  const k = c === HERO ? 1.25 : 1, fl = 1 + .08 * Math.sin(t * 23 + c.seed * 5) + .05 * Math.sin(t * 37 + c.seed * 11);
+  const h = 46 * k * fl * L, w = 11 * k * (.6 + .4 * Math.min(1, L)), ln = lean(c, t), x = c.wx, y = c.wy;
+  const tipX = x + ln * h * .9 + Math.sin(t * 9 + c.seed * 3) * 2, tipY = y - h * (1 - .25 * ln);
+  add(ctx, () => { dot(ctx, glowSpr(C.flame), x + ln * 14, y - h * .4, 150 * k * L, .32); dot(ctx, glowSpr(C.ember), x + ln * 10, y - h * .35, 48 * k * L, .55); });
+  const body = (s, col, a) => {
+    ctx.beginPath(); ctx.moveTo(lerp(x, tipX, 1), lerp(y, tipY, s));
+    ctx.bezierCurveTo(x + w * s * 1.1 + ln * h * .35, y - h * .45 * s, x + w * s, y + w * .2, x, y + w * .3 * s);
+    ctx.bezierCurveTo(x - w * s, y + w * .2, x - w * s * 1.1 + ln * h * .35, y - h * .45 * s, lerp(x, tipX, 1), lerp(y, tipY, s));
+    ctx.fillStyle = rgba(col, a); ctx.fill();
+  };
+  add(ctx, () => { body(1, C.ember, .85); body(.78, C.flame, .9); body(.5, '#fff6d8', .95); });
+  ctx.fillStyle = rgba('#5a8cff', .45 * Math.min(1, L)); ctx.beginPath(); ctx.ellipse(x, y + 2, w * .45, w * .3, 0, 0, 7); ctx.fill();
+}
+function drawSmoke(ctx, c, t) {
+  const tau = t - c.off - .05; if (tau <= 0 || tau > 2.6) return;
+  const fade = 1 - prog(tau, 1.2, 2.6), hs = Math.min(tau * 210, 460);
+  for (const [lw, a] of [[12, .07], [3.2, .34]]) {
+    ctx.lineWidth = lw; ctx.lineCap = 'round';
+    for (let j = 0; j < 22; j++) {
+      const s0 = j / 22, s1 = (j + 1) / 22, px = s => c.wx + s * hs * .32 + Math.sin(s * 7 + tau * 2.4 + c.seed) * 16 * s * (1 + tau), py = s => c.wy - s * hs;
+      ctx.strokeStyle = rgba('#e8dcf2', a * fade * (1 - s0) * Math.min(1, tau * 4));
+      ctx.beginPath(); ctx.moveTo(px(s0), py(s0)); ctx.lineTo(px(s1), py(s1)); ctx.stroke();
+    }
+  }
+}
+function rocketAt(r, t) { const p = prog(t, r.t0, r.t1), e = 1 - (1 - p) * (1 - p); return {x:lerp(r.sx, r.bx, e) + Math.sin(p * 9 + r.seed) * 7 * (1 - p), y:lerp(r.sy, r.by, e)}; }
+function drawRocket(ctx, r, t) {
+  if (t < TM.glint - .1 || t > r.t1 + .02) return;
+  const g = E.outCubic(prog(t, TM.glint - .1, TM.glint + .2)), big = r.big ? 1.6 : 1;
+  add(ctx, () => {
+    if (t < r.t0) {   // a spark waiting at the top of its smoke trail
+      const tw = .75 + .25 * Math.sin(t * 13 + r.seed * 2);
+      dot(ctx, glowSpr(C.flame), r.sx, r.sy, 40 * g * big * tw, .9); dot(ctx, glowSpr('#ffffff'), r.sx, r.sy, 9 * g * big, 1);
+      return;
+    }
+    for (let k = 14; k >= 0; k--) {
+      const q = rocketAt(r, Math.max(r.t0, t - k * .02)), f = 1 - k / 15;
+      dot(ctx, glowSpr(k ? C.flame : '#ffffff'), q.x + (k ? (hash(k, r.seed) - .5) * 8 * (k / 14) : 0), q.y, (k ? 14 * f : 18) * big, k ? .55 * f * f : 1);
+    }
+    const q = rocketAt(r, t); dot(ctx, glowSpr(r.col), q.x, q.y, 60 * big, .5);
+  });
+}
+function burstPos(b, p, tau) { const d = b.R * p.f * (1 - Math.exp(-3.6 * tau)); return {x:b.x + Math.cos(p.a) * d, y:b.y + Math.sin(p.a) * d * .96 + (b.type === 'willow' ? 230 : b.type === 'ring' ? 70 : 120) * tau * tau}; }
+function drawBurst(ctx, b, t, oy = 0) {
+  const tau = t - b.t; if (tau < 0 || tau > 2.6) return;
+  add(ctx, () => {
+    dot(ctx, glowSpr('#ffffff'), b.x, b.y + oy, b.R * .9 * (.4 + tau * 2), .85 * (1 - prog(tau, 0, .35)));
+    dot(ctx, glowSpr(b.col), b.x, b.y + oy, b.R * 1.6, .28 * (1 - prog(tau, 0, 1.1)));
+    const tail = b.type === 'willow' ? .32 : .09;
+    ctx.lineCap = 'butt';
+    for (let i = 0; i < b.parts.length; i++) {
+      const p = b.parts[i]; if (tau > p.life) continue;
+      let a = Math.pow(1 - tau / p.life, 1.3); if (tau > p.life * .55 && hash(i, Math.floor(t * 18)) < .35 * p.tw + .1) a *= .25;   // late twinkle
+      const q = burstPos(b, p, tau), q0 = burstPos(b, p, Math.max(0, tau - tail));
+      ctx.strokeStyle = rgba(p.col, a * .8); ctx.lineWidth = 3.4 * p.sz; ctx.beginPath(); ctx.moveTo(q0.x, q0.y + oy); ctx.lineTo(q.x, q.y + oy); ctx.stroke();
+      dot(ctx, glowSpr(p.col), q.x, q.y + oy, 15 * p.sz, a);
+      dot(ctx, glowSpr('#ffffff'), q.x, q.y + oy, 4 * p.sz, a);
+    }
+  });
+}
+
+/* 4. Scenes. */
+// A: the world of candles, cake and sky, under one continuous camera (0 → the flood into pink).
+film.scene(0, TM.iris[1] + .05, (ctx, t) => {
+  const c = camAt(t), light = clamp(litTotal(t) / 4);
+  ctx.save(); cam.apply(ctx, c);
+  const bg = ctx.createLinearGradient(0, -2300, 0, 1700);
+  bg.addColorStop(0, C.deep); bg.addColorStop(.42, C.night); bg.addColorStop(.72, '#2a1745'); bg.addColorStop(1, C.plum);
+  ctx.fillStyle = bg; ctx.fillRect(-3000, -3000, 7000, 7000);
+  for (const s of STARS) { const a = (.35 + .4 * Math.sin(t * s.sp + s.ph)) * clamp((500 - s.y) / 700); if (a > .02) { ctx.fillStyle = rgba('#ffffff', a); ctx.beginPath(); ctx.arc(s.x, s.y, s.r / Math.sqrt(c.s), 0, 7); ctx.fill(); } }
+  ctx.restore();
+  // party bokeh, far away: a slower parallax than the world
+  add(ctx, () => { for (const b of BOKEH) { const y = b.y - (c.fy - 1060) * .35 + Math.sin(t * .4 + b.ph) * 20, s = Math.pow(c.s, .35); dot(ctx, discSpr(b.col), CX + (b.x - CX) * s, 960 + (y - 960) * s, b.r * s, b.a * (.6 + .6 * light)); } });
+
+  ctx.save(); cam.apply(ctx, c);
+  // warm room light grows with the number of lit candles
+  add(ctx, () => { dot(ctx, glowSpr(C.flame), CX, 820, 900, .1 + .14 * light); dot(ctx, glowSpr(C.ember), CX, 1100, 700, .05 + .07 * light); });
+  // stand
+  const pg = ctx.createLinearGradient(CX - PLATE.rx, 0, CX + PLATE.rx, 0); pg.addColorStop(0, '#8a5a12'); pg.addColorStop(.4, '#ffe08a'); pg.addColorStop(1, '#7a4a0a');
+  ctx.fillStyle = pg; ctx.beginPath(); ctx.ellipse(CX, PLATE.y + 10, PLATE.rx, PLATE.ry, 0, 0, 7); ctx.fill();
+  ctx.fillStyle = '#fff1c2'; ctx.beginPath(); ctx.ellipse(CX, PLATE.y, PLATE.rx - 8, PLATE.ry - 8, 0, 0, 7); ctx.fill();
+  for (const tr of TIERS) drawTier(ctx, tr, light);
+  for (const cd of BY_DEPTH) drawCandle(ctx, cd);
+  // darkness falls off from the flames; it lifts as more candles burn
+  const dk = ctx.createRadialGradient(CX, 820, 60, CX, 900, 520 + 520 * light);
+  const dka = (.62 - .3 * light) * (1 - E.inOutCubic(prog(t, ...TM.tilt)));
+  dk.addColorStop(0, rgba(C.deep, 0)); dk.addColorStop(1, rgba(C.deep, dka));
+  if (dka > .005) { ctx.fillStyle = dk; ctx.fillRect(-3000, -3000, 7000, 7000); }
+  // the ember that lights the first candle
+  if (t < TM.ignite + .05) {
+    const P = u => { const v = clamp(u, -1, 1); return {x:(1 - v) * (1 - v) * 350 + 2 * (1 - v) * v * 360 + v * v * HERO.wx, y:(1 - v) * (1 - v) * 960 + 2 * (1 - v) * v * 700 + v * v * HERO.wy}; };
+    const u0 = E.inOutSine(clamp(t / TM.ignite)), head = P(u0);
+    add(ctx, () => {
+      for (let k = 12; k >= 0; k--) { const q = P(u0 - .05 - k * .035), f = 1 - k / 13; dot(ctx, glowSpr(C.ember), q.x + (hash(k, 3) - .5) * 12, q.y + (hash(k, 4) - .5) * 12, 11 * f, .75 * f); }
+      dot(ctx, glowSpr(C.flame), head.x, head.y, 90, .8); dot(ctx, glowSpr('#ffffff'), head.x, head.y, 14, 1);
+    });
+  }
+  // sparks hopping from flame to wick, lighting the ring of candles
+  for (const cd of RING) {
+    const hp = prog(t, cd.on - .22, cd.on); if (hp <= 0 || hp >= 1) continue;
+    const s = cd.src, x = lerp(s.wx, cd.wx, hp), y = lerp(s.wy - 20, cd.wy, hp) - Math.sin(Math.PI * hp) * 46;
+    add(ctx, () => { dot(ctx, glowSpr(C.flame), x, y, 34, .9); dot(ctx, glowSpr('#ffffff'), x, y, 8, 1); });
+  }
+  // ignition sparkle on each wick
+  add(ctx, () => { for (const cd of CANDLES) { const q = prog(t, cd.on, cd.on + .35); if (q > 0 && q < 1) for (let k = 0; k < 8; k++) { const a = k / 8 * 6.28 + cd.seed, d = 8 + 34 * E.outCubic(q); dot(ctx, glowSpr(C.flame), cd.wx + Math.cos(a) * d, cd.wy - 12 + Math.sin(a) * d, 6, 1 - q); } } });
+  for (const cd of BY_DEPTH) drawFlame(ctx, cd, t, lit(cd, t));
+  for (const cd of CANDLES) drawSmoke(ctx, cd, t);
+  for (const r of ROCKETS) drawRocket(ctx, r, t);
+  for (const b of BURSTS) drawBurst(ctx, b, t, SKY);
+  ctx.restore();
+
+  // a soft scrim keeps the headlines clear of the art
+  const sc = ctx.createLinearGradient(0, 200, 0, 760); sc.addColorStop(0, rgba(C.deep, .5)); sc.addColorStop(1, rgba(C.deep, 0)); ctx.fillStyle = sc; ctx.fillRect(0, 0, W, 760);
+  // headlines
+  T.line(ctx, [{s:'Today is a', f:HEAD, c:C.fg}], CX, 420, t, {t0:TM.t1[0], align:'center', out:[TM.out1, .3]});
+  T.line(ctx, [{s:'big day.', f:HEAD_I, c:C.flame, glow:[C.flame, .55, 34]}], CX, 526, t, {t0:TM.t1[1], align:'center', out:[TM.out1, .3]});
+  T.line(ctx, [{s:'Candles?', f:HEAD, c:C.fg}], CX, 420, t, {t0:TM.t2, align:'center', out:[TM.out2, .3]});
+  T.line(ctx, [{s:'Lit.', f:HEAD_I, c:C.flame, glow:[C.flame, .6, 36]}], CX, 526, t, {t0:TM.lit, align:'center', out:[TM.out2, .3]});
+  T.line(ctx, [{s:'Make a', f:HEAD, c:C.fg}], CX, 420, t, {t0:TM.t3[0], align:'center', out:[TM.out3, .3]});
+  T.line(ctx, [{s:'wish.', f:HEAD_I, c:C.lilac, glow:[C.lilac, .6, 36]}], CX, 526, t, {t0:TM.t3[1], align:'center', out:[TM.out3, .3]});
+  T.line(ctx, [{s:'Cue the', f:HEAD, c:C.fg}], CX, 420, t, {t0:TM.t4[0], align:'center', out:[TM.out4, .3]});
+  T.line(ctx, [{s:'fireworks.', f:HEAD_I, c:C.pink, glow:[C.pink, .6, 36]}], CX, 526, t, {t0:TM.t4[1], align:'center', out:[TM.out4, .3]});
+});
+
+function drawConfetti(ctx, t, front, alpha = 1) {
+  const tau = t - TM.cannons; if (tau <= 0) return;
+  for (let i = 0; i < CONF.n; i++) {
+    if ((i % 3 === 0) !== front) continue;
+    const p = CONF.at(i, tau); if (p.y > H + 60 || p.y < -120 || p.x < -60 || p.x > W + 60) continue;
+    const col = CONF_COLS[i % CONF_COLS.length], sz = .75 + p.z * .75, flip = Math.cos(p.fl), shade = .45 + .55 * Math.abs(flip);
+    ctx.save(); ctx.globalAlpha *= alpha; ctx.translate(p.x, p.y); ctx.rotate(p.rot); ctx.scale(1, Math.max(.12, Math.abs(flip)));
+    ctx.fillStyle = mix(col, C.wine, (1 - shade) * .7);
+    if (i % 5 === 1) { ctx.beginPath(); ctx.arc(0, 0, 7 * sz, 0, 7); ctx.fill(); }
+    else if (i % 7 === 2) { ctx.fillRect(-18 * sz, -3 * sz, 36 * sz, 6 * sz); }
+    else { ctx.fillRect(-10 * sz, -6 * sz, 20 * sz, 12 * sz); }
+    ctx.restore();
+  }
+}
+function drawBalloon(ctx, b, i, t) {
+  const tau = t - b.t0; if (tau <= 0) return;
+  const y = 2120 - b.v * tau, x = b.x + Math.sin(tau * 1.7 + i * 2) * 26, sway = Math.sin(tau * 1.7 + i * 2 + .6) * .08;
+  if (y < -260) return;
+  ctx.save(); ctx.translate(x, y); ctx.rotate(sway);
+  ctx.strokeStyle = 'rgba(255,255,255,.7)'; ctx.lineWidth = 2.5; ctx.beginPath(); ctx.moveTo(0, b.r * 1.2);
+  for (let k = 1; k <= 12; k++) ctx.lineTo(Math.sin(k * .9 + tau * 5 + i) * 7, b.r * 1.2 + k * 20); ctx.stroke();
+  ctx.fillStyle = M.mix(b.col, C.wine, .3); ctx.beginPath(); ctx.moveTo(-9, b.r * 1.22); ctx.lineTo(9, b.r * 1.22); ctx.lineTo(0, b.r * 1.08); ctx.closePath(); ctx.fill();
+  const g = ctx.createRadialGradient(-b.r * .35, -b.r * .45, 4, 0, 0, b.r * 1.3);
+  g.addColorStop(0, M.mix(b.col, '#ffffff', .55)); g.addColorStop(.45, b.col); g.addColorStop(1, M.mix(b.col, C.wine, .45));
+  ctx.fillStyle = g; ctx.beginPath(); ctx.ellipse(0, 0, b.r, b.r * 1.18, 0, 0, 7); ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,.55)'; ctx.beginPath(); ctx.ellipse(-b.r * .38, -b.r * .5, b.r * .14, b.r * .28, -.5, 0, 7); ctx.fill();
+  ctx.restore();
+}
+function drawWord(ctx, wd, t) {
+  const F = LETTER_FONT(wd.px), ls = wd.px * .03;
+  T.setFont(ctx, F); const ws = [...wd.s].map(ch => ctx.measureText(ch).width), tw = ws.reduce((a, b) => a + b, 0) + ls * (ws.length - 1);
+  let x = CX - tw / 2, allIn = true, any = false; const x0 = x;
+  [...wd.s].forEach((ch, i) => {
+    const tl = wd.land[i], p = prog(t, tl - .1, tl + .26), cx = x + ws[i] / 2; x += ws[i] + ls;
+    if (p <= 0) { allIn = false; return; } any = true; if (p < 1) allIn = false;
+    const sc = E.outBack(p), r0 = (hash(i, wd.px) - .5) * .9, rest = (i % 2 ? .035 : -.035);
+    const bob = Math.sin((t - tl) * 3.4 + i * .8) * 6 * prog(t, tl + .26, tl + .7), dy = -90 * (1 - E.outCubic(p)) + bob;
+    ctx.save(); ctx.translate(cx, wd.y - wd.px * .34 + dy); ctx.rotate(rest + r0 * (1 - E.outCubic(p))); ctx.scale(sc, sc);
+    ctx.textAlign = 'center'; ctx.textBaseline = 'alphabetic'; T.setFont(ctx, F);
+    ctx.fillStyle = C.wine; for (let k = 12; k >= 1; k--) ctx.fillText(ch, k * .5, wd.px * .34 + k * 1.5);
+    ctx.lineJoin = 'round'; ctx.lineWidth = wd.px * .05; ctx.strokeStyle = C.wine; ctx.strokeText(ch, 0, wd.px * .34);
+    ctx.fillStyle = wd.col[i]; ctx.fillText(ch, 0, wd.px * .34);
+    ctx.restore();
+  });
+  if (any) T.rec(ctx, wd.s, x0, wd.y, tw, wd.px, allIn ? 1 : .2, 'text', 1);
+}
+
+// C: the end card (drawn under the party scene so the iris can close onto it).
+const P = {x:540, y:940};                       // where the glasses meet
+const FL = {RW:62, BW:20, BH:270, SH:150, theta:.24, k:1.18};
+function flute(ctx, t, mirror) {
+  const {RW, BW, BH, SH} = FL, bowl = () => { ctx.beginPath(); ctx.moveTo(-RW, 0); ctx.bezierCurveTo(-RW, BH * .55, -BW * 1.6, BH * .9, -BW * .5, BH); ctx.lineTo(BW * .5, BH); ctx.bezierCurveTo(BW * 1.6, BH * .9, RW, BH * .55, RW, 0); ctx.closePath(); };
+  ctx.save(); bowl(); ctx.clip();
+  ctx.fillStyle = 'rgba(255,255,255,.06)'; ctx.fillRect(-RW, 0, 2 * RW, BH);
+  const th = FL.theta * (mirror ? -1 : 1), LT = 52;     // keep the champagne's surface level while the glass tilts
+  const lg = ctx.createLinearGradient(0, LT, 0, BH); lg.addColorStop(0, '#ffe9a0'); lg.addColorStop(.5, '#f6c445'); lg.addColorStop(1, '#d9952a');
+  ctx.fillStyle = lg; ctx.beginPath(); ctx.moveTo(-RW * 2, LT + RW * 2 * Math.tan(th)); ctx.lineTo(RW * 2, LT - RW * 2 * Math.tan(th)); ctx.lineTo(RW * 2, BH + 20); ctx.lineTo(-RW * 2, BH + 20); ctx.closePath(); ctx.fill();
+  ctx.fillStyle = 'rgba(255,255,255,.75)';
+  for (let k = 0; k < 16; k++) { const bx = (hash(k, 4) - .5) * RW * 1.1 * (.4 + .6 * hash(k, 5)), sp = 70 + 60 * hash(k, 6), by = BH - 10 - ((t * sp + hash(k, 7) * 400) % (BH - LT - 10)); ctx.beginPath(); ctx.arc(bx * (by / BH + .2), by, 2 + 2 * hash(k, 8), 0, 7); ctx.fill(); }
+  ctx.restore();
+  bowl(); ctx.strokeStyle = 'rgba(255,255,255,.8)'; ctx.lineWidth = 3; ctx.stroke();
+  ctx.strokeStyle = 'rgba(255,255,255,.55)'; ctx.lineWidth = 6; ctx.lineCap = 'round'; ctx.beginPath(); ctx.moveTo(-RW * .62, 22); ctx.bezierCurveTo(-RW * .62, BH * .45, -BW * 1.3, BH * .8, -BW * .6, BH * .9); ctx.stroke();
+  ctx.strokeStyle = 'rgba(255,255,255,.85)'; ctx.lineWidth = 2.5; ctx.beginPath(); ctx.ellipse(0, 0, RW, 9, 0, 0, 7); ctx.stroke();
+  const sg = ctx.createLinearGradient(-6, 0, 6, 0); sg.addColorStop(0, 'rgba(255,255,255,.35)'); sg.addColorStop(.5, 'rgba(255,255,255,.9)'); sg.addColorStop(1, 'rgba(255,255,255,.35)');
+  ctx.fillStyle = sg; ctx.fillRect(-5, BH, 10, SH);
+  ctx.fillStyle = 'rgba(255,255,255,.22)'; ctx.beginPath(); ctx.ellipse(0, BH + SH, 74, 13, 0, 0, 7); ctx.fill();
+  ctx.strokeStyle = 'rgba(255,255,255,.8)'; ctx.lineWidth = 2.5; ctx.stroke();
+}
+function drawGlasses(ctx, t) {
+  const p = E.outCubic(prog(t, ...TM.glassIn)); if (p <= 0) return;
+  const tc = t - TM.clink, recoil = tc > 0 ? Math.sin(tc * 16) * Math.exp(-tc * 5) * 12 : 0;
+  const th = FL.theta - (1 - p) * .35 + (tc > 0 ? Math.sin(tc * 16) * Math.exp(-tc * 5) * .04 : 0) + Math.sin(t * 1.3) * .012;
+  const ox = P.x - Math.cos(th) * FL.RW * FL.k - (1 - p) * 640 - Math.max(0, recoil), oy = P.y - Math.sin(th) * FL.RW * FL.k + (1 - p) * 120;
+  ctx.save(); ctx.translate(ox, oy); ctx.rotate(th); ctx.scale(FL.k, FL.k); flute(ctx, t, false); ctx.restore();
+  ctx.save(); ctx.translate(W - ox, oy); ctx.scale(-1, 1); ctx.rotate(th); ctx.scale(FL.k, FL.k); flute(ctx, t, true); ctx.restore();
+}
+function drawClink(ctx, t) {
+  const tc = t - TM.clink; if (tc < 0 || tc > 1.6) return;
+  add(ctx, () => {
+    const f = 1 - prog(tc, 0, .9);
+    dot(ctx, glowSpr(C.gold), P.x, P.y, 260 * (.6 + tc), .7 * f);
+    dot(ctx, glowSpr('#ffffff'), P.x, P.y, 50, f);
+    ctx.save(); ctx.translate(P.x, P.y); ctx.rotate(tc * .6);
+    for (let k = 0; k < 4; k++) { ctx.rotate(Math.PI / 2); const L = 150 * E.outCubic(prog(tc, 0, .18)) * f; const g = ctx.createLinearGradient(0, 0, L, 0); g.addColorStop(0, rgba('#ffffff', f)); g.addColorStop(1, rgba('#ffffff', 0)); ctx.fillStyle = g; ctx.beginPath(); ctx.moveTo(0, -5); ctx.lineTo(L, 0); ctx.lineTo(0, 5); ctx.closePath(); ctx.fill(); }
+    ctx.restore();
+    for (let k = 0; k < 22; k++) {   // sparkles and champagne droplets
+      const a = -Math.PI / 2 + (hash(k, 30) - .5) * 2.6, v = 260 + 380 * hash(k, 31), x = P.x + Math.cos(a) * v * tc, y = P.y + Math.sin(a) * v * tc + 520 * tc * tc;
+      dot(ctx, glowSpr(k % 3 ? C.gold : '#ffffff'), x, y, 10 + 6 * hash(k, 32), (1 - prog(tc, .3, 1.4)));
+    }
+  });
+}
+film.scene(TM.close[0] - .05, DUR, (ctx, t) => {
+  const g = ctx.createRadialGradient(CX, 880, 40, CX, 960, 1250); g.addColorStop(0, '#5c2a66'); g.addColorStop(.5, '#2f1748'); g.addColorStop(1, '#170c2c');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  const push = 1 + .02 * E.outCubic(prog(t, TM.clink, DUR)); ctx.translate(CX, 960); ctx.scale(push, push); ctx.translate(-CX, -960);   // slow push-in on the end card
+  add(ctx, () => {
+    for (const b of BOKEH) dot(ctx, discSpr(b.col), b.x, b.y * .75 + 300 + Math.sin(t * .4 + b.ph) * 20, b.r, b.a * 1.1);
+    dot(ctx, glowSpr(C.gold), P.x, P.y + 160, 620, .22);
+  });
+  for (let k = 0; k < 18; k++) {   // twinkles
+    const x = 80 + hash(k, 50) * 920, y = 260 + hash(k, 51) * 1300, a = Math.max(0, Math.sin(t * (1.5 + hash(k, 52) * 2) + k)) * .8;
+    if (y > 260 && y < 690) continue;
+    add(ctx, () => { dot(ctx, glowSpr(C.gold), x, y, 16, a * .7); ctx.fillStyle = rgba('#ffffff', a); ctx.fillRect(x - 9 * a, y - 1, 18 * a, 2); ctx.fillRect(x - 1, y - 9 * a, 2, 18 * a); });
+  }
+  const ca = .85 - .45 * E.inOutCubic(prog(t, TM.clink, TM.clink + 2.5));   // confetti thins out so the card reads clean
+  drawConfetti(ctx, t, false, ca); drawConfetti(ctx, t, true, ca);
+  drawGlasses(ctx, t);
+  drawClink(ctx, t);
+  const line2 = NAME ? [{s:NAME + '!', f:HEAD_I, c:C.gold, glow:[C.gold, .55, 34]}] : [{s:'my ', f:HEAD, c:C.fg}, {s:'friend!', f:HEAD_I, c:C.gold, glow:[C.gold, .55, 34]}];
+  T.setFont(ctx, HEAD_I); const nw = T.layout(ctx, line2).width, fit = Math.min(1, 940 / nw);
+  if (fit < 1) line2.forEach(s => { s.f = s.f.replace('100px', Math.floor(100 * fit) + 'px'); });
+  T.line(ctx, [{s:'Here’s to you,', f:HEAD, c:C.fg}], CX, 420, t, {t0:TM.e1, align:'center', rise:40});
+  T.line(ctx, line2, CX, 526, t, {t0:TM.e2, align:'center', rise:40});
+  T.eyebrow(ctx, [{s:'HAPPY BIRTHDAY', c:C.gold}], CX, 300, t, TM.e1 - .12, {size:32, align:'center', cps:.02});
+  T.line(ctx, [{s:'Have the best year yet.', f:`400 44px ${T.BODY}`, c:C.muted}], CX, 632, t, {t0:TM.sub, st:.04, d:.45, align:'center', rise:16});
+});
+
+// B: the party. The last firework floods the frame pink (iris open); at the end an iris closes onto the glasses.
+film.scene(TM.iris[0], TM.close[1] + .02, (ctx, t) => {
+  const opening = t < 14, r = opening ? 1300 * E.outCubic(prog(t, ...TM.iris)) : 1300 * (1 - E.inCubic(prog(t, ...TM.close)));
+  const ic = opening ? {x:HERO_BURST.x, y:HERO_BURST.y} : P;
+  if (r < 1) return;
+  ctx.save(); ctx.beginPath(); ctx.arc(ic.x, ic.y, r, 0, 7); ctx.clip();
+  const g = ctx.createRadialGradient(CX, 820, 60, CX, 900, 1300); g.addColorStop(0, '#ff9cc9'); g.addColorStop(.45, C.rose); g.addColorStop(1, '#9c1766');
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  ctx.save(); ctx.translate(CX, 820); ctx.rotate(t * .12); ctx.fillStyle = 'rgba(255,255,255,.075)';
+  for (let k = 0; k < 18; k++) { const a0 = k * Math.PI / 9; ctx.beginPath(); ctx.moveTo(0, 0); ctx.arc(0, 0, 1800, a0, a0 + Math.PI / 18); ctx.closePath(); ctx.fill(); }
+  ctx.restore();
+  BALLOONS.forEach((b, i) => drawBalloon(ctx, b, i, t));
+  drawConfetti(ctx, t, false);
+  for (const wd of WORDS) drawWord(ctx, wd, t);
+  drawConfetti(ctx, t, true);
+  ctx.restore();
+  // a bright rim on the iris edge
+  if (r < 1290) add(ctx, () => { ctx.strokeStyle = rgba(opening ? '#fff0f6' : C.gold, .55); ctx.lineWidth = 10; ctx.beginPath(); ctx.arc(ic.x, ic.y, r, 0, 7); ctx.stroke(); ctx.strokeStyle = rgba(C.pink, .25); ctx.lineWidth = 46; ctx.stroke(); });
+});
+
+/* 5. Overlays: the hero firework stays on top of the flood into pink. */
+film.overlay((ctx, t) => {
+  if (t >= TM.hero - .02 && t < TM.hero + 2.6) drawBurst(ctx, HERO_BURST, t);
+});
+
+/* 6. Cues for the score. */
+const songTimes = [...TM.song1, ...TM.song4];
+film.cues = {ignite:TM.ignite, pull:TM.pull, chain:TM.chain, push:TM.push, gust:TM.gust, offs:CANDLES.map(c => c.off).sort((a, b) => a - b),
+  glint:TM.glint, tilt:TM.tilt, launches:ROCKETS.map(r => r.t0), launchX:ROCKETS.map(r => r.bx), bursts:TM.bursts, burstX:BURSTS.map(b => b.x), burstType:BURSTS.map(b => b.type),
+  hero:TM.hero, song1:TM.song1, song4:TM.song4, letters:WORDS.flatMap(w => w.land), cannons:TM.cannons, balloons:TM.balloons,
+  close:TM.close, clink:TM.clink, e1:TM.e1, sub:TM.sub,
+  transitions:[TM.pull, TM.tilt, [TM.hero - .1, TM.iris[1] + .1], [TM.close[0], TM.clink + .1]],
+  sync:['chain', 'bursts', 'song1']};
+
+film.start([`300 40px ${T.DISP}`, `italic 300 40px ${T.DISP}`, `900 40px ${T.DISP}`, `400 20px ${T.BODY}`, `500 20px ${T.MONO}`]);
+})();
+</script>
+</body>
+</html>
